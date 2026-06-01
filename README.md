@@ -1,16 +1,18 @@
-# CSE 144 Final Project — Transfer Learning on CIFAR-100 Subset
+# CSE 144 Final Project — Transfer Learning
 
 100-class image classification using EfficientNet-B0 fine-tuned on the [UCSC CSE 144 Spring 2026 Kaggle competition](https://www.kaggle.com/competitions/ucsc-cse-144-spring-2026-final-project) dataset.
 
 ## Repository Structure
 
 ```
-├── train.py               # Training script (two-phase fine-tuning)
-├── inference.py           # Inference script (generates submission.csv)
-├── cse144_final.ipynb     # Exploratory notebook
-├── requirements.txt       # Python dependencies
-└── leaderboard.png        # Kaggle leaderboard screenshot (see below)
+├── train.py                  # Two-phase fine-tuning script
+├── inference.py              # Generates submission.csv from trained weights
+├── cse144_final.ipynb        # Exploratory notebook
+├── sample_submission.csv     # Submission format template
+└── requirements.txt          # Python dependencies
 ```
+
+Model weights are hosted on Google Drive (link below) and are not included in this repo.
 
 ## Setup
 
@@ -22,17 +24,17 @@ pip install -r requirements.txt
 
 ## Dataset
 
-Download the dataset from Kaggle and place it so the directory structure looks like:
+Download the dataset from the [Kaggle competition page](https://www.kaggle.com/competitions/ucsc-cse-144-spring-2026-final-project) and extract it into the project root so the structure looks like:
 
 ```
 final_project/
 ├── train/
-│   ├── 0/   (10 images)
+│   ├── 0/      (10 images per class)
 │   ├── 1/
-│   └── ... (100 classes total)
+│   └── ...     (100 classes total)
 └── test/
     ├── 0.jpg
-    └── ... (1000 images)
+    └── ...     (1036 images)
 ```
 
 ## Training
@@ -41,29 +43,28 @@ final_project/
 python train.py
 ```
 
-This runs two phases:
-1. **Phase 1 (5 epochs)** — backbone frozen, only the classification head is trained (`lr=1e-3`)
-2. **Phase 2 (15 epochs)** — full fine-tuning of all layers (`lr=1e-4`)
+Two-phase fine-tuning with a fixed seed (`SEED = 42`) for reproducibility:
 
-The best checkpoint (by validation accuracy) is saved to `best_model.pth`.
+| Phase | Epochs | LR | Backbone |
+|-------|--------|-----|----------|
+| 1 | 5 | 1e-3 | Frozen |
+| 2 | 15 | 1e-4 | Unfrozen |
 
-Reproducibility is ensured via a fixed seed (`SEED = 42`). Key hyperparameters are at the top of `train.py`.
+The best checkpoint by validation accuracy is saved to `best_model.pth`.
 
 ## Inference
-
-After training, generate `submission.csv` with:
 
 ```bash
 python inference.py
 ```
 
-Requires `best_model.pth` and the `test/` directory to be present. Outputs `submission.csv` formatted for Kaggle submission.
+Loads `best_model.pth` and writes `submission.csv` with predictions for all 1036 test images. The CSV format matches the Kaggle submission template (`ID` = filename, e.g. `0.jpg`).
 
 ## Pretrained Model Weights
 
-Trained weights (`best_model.pth`) are available on Google Drive:
+Trained `best_model.pth` available on Google Drive:
 
-> [Google Drive link — add after uploading weights]
+> **[Add Google Drive link here after uploading]**
 
 ## Kaggle Leaderboard
 

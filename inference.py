@@ -74,7 +74,6 @@ def predict(test_dir: str = TEST_DIR, checkpoint: str = CHECKPOINT, output: str 
     rows = []
     with torch.no_grad():
         for fname in image_files:
-            img_id = int(os.path.splitext(fname)[0])
             img_path = os.path.join(test_dir, fname)
 
             image  = Image.open(img_path).convert("RGB")
@@ -82,10 +81,10 @@ def predict(test_dir: str = TEST_DIR, checkpoint: str = CHECKPOINT, output: str 
 
             logits = model(tensor)
             pred   = logits.argmax(dim=1).item()
-            rows.append((img_id, pred))
+            rows.append((fname, pred))  # ID is filename e.g. "0.jpg"
 
     # Write submission
-    rows.sort(key=lambda r: r[0])   # ensure ascending ID order
+    rows.sort(key=lambda r: int(os.path.splitext(r[0])[0]))  # ascending numeric order
     with open(output, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["ID", "Label"])
