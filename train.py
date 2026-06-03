@@ -1,5 +1,5 @@
 """
-train.py — Transfer learning with EfficientNet-B0 for CSE 144 final project.
+train.py — Transfer learning with EfficientNet-V2-M for CSE 144 final project.
 Trains on 100-class image data downloaded via kagglehub.
 """
 
@@ -31,21 +31,22 @@ set_seed(SEED)
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
-TRAIN_DIR      = "train"        # path to train/ folder from kagglehub download
-CHECKPOINT     = "best_model.pth"
+TRAIN_DIR = "/kaggle/input/competitions/ucsc-cse-144-spring-2026-final-project/train"
+CHECKPOINT = "/kaggle/working/best_model.pth"
 NUM_CLASSES    = 100
-BATCH_SIZE     = 32
+BATCH_SIZE     = 16
 NUM_WORKERS    = 4
-IMG_SIZE       = 224            # EfficientNet-B0 default input size
+IMG_SIZE       = 384            # EfficientNet-V2-M native input size
 
 # Phase 1: backbone frozen
-FREEZE_EPOCHS  = 5
+FREEZE_EPOCHS  = 10
 FREEZE_LR      = 1e-3
 
 # Phase 2: all layers unfrozen
-UNFREEZE_EPOCHS = 15
+UNFREEZE_EPOCHS = 80
 UNFREEZE_LR     = 1e-4
 
+MIXUP_ALPHA    = 0.0            # disabled — over-regularizes when combined with label smoothing + RandomErasing
 VAL_SPLIT      = 0.2
 
 
@@ -62,6 +63,7 @@ train_transform = transforms.Compose([
     transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
     transforms.ToTensor(),
     transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    transforms.RandomErasing(p=0.25),
 ])
 
 val_transform = transforms.Compose([
@@ -83,14 +85,12 @@ class NumericalImageFolder(datasets.ImageFolder):
         classes = [
             d.name for d in os.scandir(directory) if d.is_dir()
         ]
-        # Sort by integer value so folder "2" < folder "10"
         classes.sort(key=lambda x: int(x))
         class_to_idx = {cls: int(cls) for cls in classes}
         return classes, class_to_idx
 
 
 def build_dataloaders(train_dir: str):
-    # Load full dataset with train transforms; we'll swap val transforms below
     full_dataset = NumericalImageFolder(train_dir, transform=train_transform)
 
     indices = list(range(len(full_dataset)))
@@ -100,10 +100,9 @@ def build_dataloaders(train_dir: str):
         indices,
         test_size=VAL_SPLIT,
         random_state=SEED,
-        stratify=labels,   # keep class balance in both splits
+        stratify=labels,
     )
 
-    # Val split gets its own dataset instance with val transforms
     val_dataset = NumericalImageFolder(train_dir, transform=val_transform)
 
     train_subset = Subset(full_dataset, train_idx)
@@ -130,21 +129,31 @@ def build_dataloaders(train_dir: str):
     return train_loader, val_loader
 
 
+# ── MixUp ─────────────────────────────────────────────────────────────────────
+
+def mixup_data(x, y, alpha: float):
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
+    index = torch.randperm(x.size(0), device=x.device)
+    mixed_x = lam * x + (1 - lam) * x[index]
+    return mixed_x, y, y[index], lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+
 # ── Model ─────────────────────────────────────────────────────────────────────
 
 def build_model(num_classes: int) -> nn.Module:
-    model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
-    # Replace the final classification head
+    model = models.efficientnet_v2_m(weights=models.EfficientNet_V2_M_Weights.IMAGENET1K_V1)
     in_features = model.classifier[1].in_features
     model.classifier = nn.Sequential(
-        nn.Dropout(p=0.2, inplace=True),
+        nn.Dropout(p=0.3, inplace=True),
         nn.Linear(in_features, num_classes),
     )
     return model
 
 
 def freeze_backbone(model: nn.Module):
-    """Freeze all layers except the classifier head."""
     for param in model.parameters():
         param.requires_grad = False
     for param in model.classifier.parameters():
@@ -152,7 +161,6 @@ def freeze_backbone(model: nn.Module):
 
 
 def unfreeze_all(model: nn.Module):
-    """Unfreeze every layer for full fine-tuning."""
     for param in model.parameters():
         param.requires_grad = True
 
@@ -167,8 +175,13 @@ def run_epoch(model, loader, criterion, optimizer, device, train: bool):
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
 
-            outputs = model(images)
-            loss    = criterion(outputs, labels)
+            if train and MIXUP_ALPHA > 0:
+                images, y_a, y_b, lam = mixup_data(images, labels, MIXUP_ALPHA)
+                outputs = model(images)
+                loss    = mixup_criterion(criterion, outputs, y_a, y_b, lam)
+            else:
+                outputs = model(images)
+                loss    = criterion(outputs, labels)
 
             if train:
                 optimizer.zero_grad()
@@ -177,6 +190,7 @@ def run_epoch(model, loader, criterion, optimizer, device, train: bool):
 
             total_loss += loss.item() * images.size(0)
             preds       = outputs.argmax(dim=1)
+            # accuracy tracked against the primary label
             correct    += (preds == labels).sum().item()
             total      += images.size(0)
 
@@ -197,13 +211,13 @@ def train(train_dir: str = TRAIN_DIR):
     train_loader, val_loader = build_dataloaders(train_dir)
 
     model     = build_model(NUM_CLASSES).to(device)
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     best_val_acc = 0.0
 
     # ── Phase 1: train head only ──────────────────────────────────────────────
     freeze_backbone(model)
-    optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=FREEZE_LR)
+    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=FREEZE_LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=FREEZE_EPOCHS)
 
     print(f"{'='*60}")
@@ -227,8 +241,9 @@ def train(train_dir: str = TRAIN_DIR):
             print(f"           ↑ New best val acc {best_val_acc:.4f} — checkpoint saved")
 
     # ── Phase 2: fine-tune all layers ─────────────────────────────────────────
+    torch.cuda.empty_cache()
     unfreeze_all(model)
-    optimizer = optim.Adam(model.parameters(), lr=UNFREEZE_LR, weight_decay=1e-4)
+    optimizer = optim.AdamW(model.parameters(), lr=UNFREEZE_LR, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=UNFREEZE_EPOCHS)
 
     print(f"\n{'='*60}")

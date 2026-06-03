@@ -1,48 +1,58 @@
 """
-inference.py — Load best checkpoint, run on test images, write submission.csv.
+inference.py — Load best checkpoint, run on test images with TTA, write submission.csv.
 
-Expected layout:
-    test/0.jpg, test/1.jpg, ..., test/999.jpg
-    best_model.pth  (produced by train.py)
-    sample_submission.csv  (template with ID and Label columns)
+Expected layout (Kaggle):
+    /kaggle/input/.../test/0.jpg, 1.jpg, ...
+    /kaggle/working/best_model.pth  (produced by train.py)
 """
 
 import os
 import csv
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import transforms, models
 from PIL import Image
 
 
 # ── Config (must match train.py) ──────────────────────────────────────────────
 
-TEST_DIR    = "test"
-CHECKPOINT  = "best_model.pth"
-OUTPUT_CSV  = "submission.csv"
+TEST_DIR    = "/kaggle/input/competitions/ucsc-cse-144-spring-2026-final-project/test"
+CHECKPOINT  = "/kaggle/working/best_model.pth"
+OUTPUT_CSV  = "/kaggle/working/submission.csv"
 NUM_CLASSES = 100
-IMG_SIZE    = 224
+IMG_SIZE    = 480               # must match train.py
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD  = [0.229, 0.224, 0.225]
 
 
-# ── Transform (no augmentation — deterministic) ───────────────────────────────
+# ── TTA transforms: original + 3 flips ───────────────────────────────────────
 
-test_transform = transforms.Compose([
-    transforms.Resize((IMG_SIZE, IMG_SIZE)),
-    transforms.ToTensor(),
-    transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
-])
+def _base(extra_ops):
+    return transforms.Compose([
+        transforms.Resize((IMG_SIZE, IMG_SIZE)),
+        *extra_ops,
+        transforms.ToTensor(),
+        transforms.Normalize(IMAGENET_MEAN, IMAGENET_STD),
+    ])
+
+tta_transforms = [
+    _base([]),                                                          # original
+    _base([transforms.RandomHorizontalFlip(p=1.0)]),                   # h-flip
+    _base([transforms.RandomVerticalFlip(p=1.0)]),                     # v-flip
+    _base([transforms.RandomHorizontalFlip(p=1.0),
+           transforms.RandomVerticalFlip(p=1.0)]),                     # both flips
+]
 
 
 # ── Model (mirrors train.py exactly) ─────────────────────────────────────────
 
 def build_model(num_classes: int) -> nn.Module:
-    model = models.efficientnet_b0(weights=None)   # weights loaded from checkpoint
+    model = models.efficientnet_v2_m(weights=None)
     in_features = model.classifier[1].in_features
     model.classifier = nn.Sequential(
-        nn.Dropout(p=0.2, inplace=True),
+        nn.Dropout(p=0.3, inplace=True),
         nn.Linear(in_features, num_classes),
     )
     return model
@@ -59,32 +69,32 @@ def predict(test_dir: str = TEST_DIR, checkpoint: str = CHECKPOINT, output: str 
         device = torch.device("cpu")
     print(f"Device: {device}")
 
-    # Load model
     model = build_model(NUM_CLASSES)
     state = torch.load(checkpoint, map_location=device)
     model.load_state_dict(state)
     model.to(device)
     model.eval()
     print(f"Loaded checkpoint: {checkpoint}")
+    print(f"TTA passes: {len(tta_transforms)}")
 
-    # Collect test image paths sorted by numeric ID
     image_files = [f for f in os.listdir(test_dir) if f.lower().endswith((".jpg", ".jpeg", ".png"))]
-    image_files.sort(key=lambda f: int(os.path.splitext(f)[0]))  # "42.jpg" → 42
+    image_files.sort(key=lambda f: int(os.path.splitext(f)[0]))
 
     rows = []
     with torch.no_grad():
         for fname in image_files:
-            img_path = os.path.join(test_dir, fname)
+            img = Image.open(os.path.join(test_dir, fname)).convert("RGB")
 
-            image  = Image.open(img_path).convert("RGB")
-            tensor = test_transform(image).unsqueeze(0).to(device)
+            # average softmax probabilities across all TTA passes
+            probs = torch.zeros(NUM_CLASSES, device=device)
+            for tfm in tta_transforms:
+                tensor = tfm(img).unsqueeze(0).to(device)
+                probs += F.softmax(model(tensor).squeeze(0), dim=0)
 
-            logits = model(tensor)
-            pred   = logits.argmax(dim=1).item()
-            rows.append((fname, pred))  # ID is filename e.g. "0.jpg"
+            pred = probs.argmax().item()
+            rows.append((fname, pred))
 
-    # Write submission
-    rows.sort(key=lambda r: int(os.path.splitext(r[0])[0]))  # ascending numeric order
+    rows.sort(key=lambda r: int(os.path.splitext(r[0])[0]))
     with open(output, "w", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["ID", "Label"])
