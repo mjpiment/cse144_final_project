@@ -129,3 +129,13 @@ ID,Label
 | Submissions | 2 |
 
 ![Kaggle Leaderboard](leaderboard.png)
+
+---
+
+## Pretrained Model Weights
+
+The trained `best_model.pth` checkpoint is hosted on Google Drive:
+
+[Download best_model.pth](https://drive.google.com/file/d/1fuYp9oMtGQugna2mS5zIlYFgjuYtZbnn/view?usp=sharing)
+
+Place the downloaded file in the same directory as `inference.py` before running inference.
